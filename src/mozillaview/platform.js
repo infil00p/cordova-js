@@ -20,18 +20,17 @@
 */
 
 module.exports = {
-    id: 'android',
+    id: 'mozillaview',
     bootstrap: function() {
         var channel = require('cordova/channel'),
             cordova = require('cordova'),
             exec = require('cordova/exec'),
             modulemapper = require('cordova/modulemapper');
 
-        // Get the shared secret needed to use the bridge.
+        //Just fire the nativeReady, we're not using a shared secret yet
         exec.init();
 
-        // TODO: Extract this as a proper plugin.
-        modulemapper.clobbers('cordova/plugin/android/app', 'navigator.app');
+        modulemapper.clobbers('cordova/plugin/mozillaview/app', 'navigator.app');
 
         // Inject a listener for the backbutton on the document.
         var backButtonChannel = cordova.addDocumentEventHandler('backbutton');
@@ -57,9 +56,11 @@ module.exports = {
         bindButtonChannel('volumedown');
 
         // Let native code know we are all done on the JS side.
-        // Native code will then un-hide the WebView.
+        // TODO: Refactor the splashscreen
+        /*
         channel.onCordovaReady.subscribe(function() {
             exec(null, null, "App", "show", []);
         });
+        */
     }
 };

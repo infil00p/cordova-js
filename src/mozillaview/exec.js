@@ -34,47 +34,31 @@
  * @param {String[]} [args]     Zero or more arguments to pass to the method
  */
 var cordova = require('cordova'),
-    nativeApiProvider = require('cordova/android/nativeapiprovider'),
     utils = require('cordova/utils'),
     base64 = require('cordova/base64'),
     channel = require('cordova/channel'),
     jsToNativeModes = {
-        PROMPT: 0,
-        JS_OBJECT: 1
+        //We only support the JS_OBJECT in this one, because this is Mozilla and hijacking the prompt is ghetto
+        JS_OBJECT: 0
     },
     nativeToJsModes = {
         // Polls for messages using the JS->Native bridge.
         POLLING: 0,
         // For LOAD_URL to be viable, it would need to have a work-around for
         // the bug where the soft-keyboard gets dismissed when a message is sent.
-        LOAD_URL: 1,
-        // For the ONLINE_EVENT to be viable, it would need to intercept all event
-        // listeners (both through addEventListener and window.ononline) as well
-        // as set the navigator property itself.
-        ONLINE_EVENT: 2,
-        // Uses reflection to access private APIs of the WebView that can send JS
-        // to be executed.
-        // Requires Android 3.2.4 or above.
-        PRIVATE_API: 3
+        LOAD_URL: 1
     },
     jsToNativeBridgeMode,  // Set lazily.
-    nativeToJsBridgeMode = nativeToJsModes.ONLINE_EVENT,
+    nativeToJsBridgeMode = nativeToJsModes.POLLING, //We call "gap_event" on the mozillaBridge object
     pollEnabled = false,
     messagesFromNative = [],
     bridgeSecret = -1;
 
-function androidExec(success, fail, service, action, args) {
-    if (bridgeSecret < 0) {
-        // If we ever catch this firing, we'll need to queue up exec()s
-        // and fire them once we get a secret. For now, I don't think
-        // it's possible for exec() to be called since plugins are parsed but
-        // not run until until after onNativeReady.
-        throw new Error('exec() called without bridgeSecret');
-    }
+function mozillaviewExec(success, fail, service, action, args) {
+    
     // Set default bridge modes if they have not already been set.
-    // By default, we use the failsafe, since addJavascriptInterface breaks too often
     if (jsToNativeBridgeMode === undefined) {
-        androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
+        mozillaviewExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
     }
 
     // Process any ArrayBuffers in the args into a string.
@@ -91,21 +75,19 @@ function androidExec(success, fail, service, action, args) {
         cordova.callbacks[callbackId] = {success:success, fail:fail};
     }
 
-    var messages = nativeApiProvider.get().exec(bridgeSecret, service, action, callbackId, argsJson);
-    // If argsJson was received by Java as null, try again with the PROMPT bridge mode.
-    // This happens in rare circumstances, such as when certain Unicode characters are passed over the bridge on a Galaxy S2.  See CB-2666.
-    if (jsToNativeBridgeMode == jsToNativeModes.JS_OBJECT && messages === "@Null arguments.") {
-        androidExec.setJsToNativeBridgeMode(jsToNativeModes.PROMPT);
-        androidExec(success, fail, service, action, args);
-        androidExec.setJsToNativeBridgeMode(jsToNativeModes.JS_OBJECT);
-        return;
-    } else {
-        androidExec.processMessages(messages, true);
-    }
+    /* 
+     * The bridge in Mozilla is async, so we need a callback here to handle this.
+     *
+     * The anonymous method is so we can process the messages.
+     */
+
+    window.mozillaBridge.exec(service, action, callbackId, argsJson, function(response) {
+        var result = response.result;
+        mozillaviewExec.processMessages(result, true);
+    });
 }
 
-androidExec.init = function() {
-    bridgeSecret = +prompt('', 'gap_init:' + nativeToJsBridgeMode);
+mozillaviewExec.init = function() {
     channel.onNativeReady.fire();
 };
 
@@ -114,13 +96,10 @@ function pollOnceFromOnlineEvent() {
 }
 
 function pollOnce(opt_fromOnlineEvent) {
-    if (bridgeSecret < 0) {
-        // This can happen when the NativeToJsMessageQueue resets the online state on page transitions.
-        // We know there's nothing to retrieve, so no need to poll.
-        return;
-    }
-    var msg = nativeApiProvider.get().retrieveJsMessages(bridgeSecret, !!opt_fromOnlineEvent);
-    androidExec.processMessages(msg);
+    window.mozillaBridge.poll(function(response) {
+      var result = response.result;
+      mozillaviewExec.processMessages(result);
+    });
 }
 
 function pollingTimerFunc() {
@@ -130,54 +109,20 @@ function pollingTimerFunc() {
     }
 }
 
-function hookOnlineApis() {
-    function proxyEvent(e) {
-        cordova.fireWindowEvent(e.type);
-    }
-    // The network module takes care of firing online and offline events.
-    // It currently fires them only on document though, so we bridge them
-    // to window here (while first listening for exec()-releated online/offline
-    // events).
-    window.addEventListener('online', pollOnceFromOnlineEvent, false);
-    window.addEventListener('offline', pollOnceFromOnlineEvent, false);
-    cordova.addWindowEventHandler('online');
-    cordova.addWindowEventHandler('offline');
-    document.addEventListener('online', proxyEvent, false);
-    document.addEventListener('offline', proxyEvent, false);
-}
+mozillaviewExec.jsToNativeModes = jsToNativeModes;
+mozillaviewExec.nativeToJsModes = nativeToJsModes;
 
-hookOnlineApis();
-
-androidExec.jsToNativeModes = jsToNativeModes;
-androidExec.nativeToJsModes = nativeToJsModes;
-
-androidExec.setJsToNativeBridgeMode = function(mode) {
+mozillaviewExec.setJsToNativeBridgeMode = function(mode) {
     if (mode == jsToNativeModes.JS_OBJECT && !window._cordovaNative) {
         mode = jsToNativeModes.PROMPT;
     }
-    nativeApiProvider.setPreferPrompt(mode == jsToNativeModes.PROMPT);
     jsToNativeBridgeMode = mode;
 };
 
-androidExec.setNativeToJsBridgeMode = function(mode) {
-    if (mode == nativeToJsBridgeMode) {
-        return;
-    }
-    if (nativeToJsBridgeMode == nativeToJsModes.POLLING) {
-        pollEnabled = false;
-    }
-
-    nativeToJsBridgeMode = mode;
-    // Tell the native side to switch modes.
-    // Otherwise, it will be set by androidExec.init()
-    if (bridgeSecret >= 0) {
-        nativeApiProvider.get().setNativeToJsBridgeMode(bridgeSecret, mode);
-    }
-
-    if (mode == nativeToJsModes.POLLING) {
-        pollEnabled = true;
-        setTimeout(pollingTimerFunc, 1);
-    }
+mozillaviewExec.setNativeToJsBridgeMode = function(mode) {
+    //We only support polling right now
+    pollEnabled = true;
+    setTimeout(pollingTimerFunc, 1);
 };
 
 function buildPayload(payload, message) {
@@ -246,7 +191,7 @@ function processMessage(message) {
 var isProcessing = false;
 
 // This is called from the NativeToJsMessageQueue.java.
-androidExec.processMessages = function(messages, opt_useTimeout) {
+mozillaviewExec.processMessages = function(messages, opt_useTimeout) {
     if (messages) {
         messagesFromNative.push(messages);
     }
@@ -255,7 +200,7 @@ androidExec.processMessages = function(messages, opt_useTimeout) {
         return;
     }
     if (opt_useTimeout) {
-        window.setTimeout(androidExec.processMessages, 0);
+        window.setTimeout(mozillaviewExec.processMessages, 0);
         return;
     }
     isProcessing = true;
@@ -292,4 +237,4 @@ function popMessageFromQueue() {
     return message;
 }
 
-module.exports = androidExec;
+module.exports = mozillaviewExec;
